@@ -37,7 +37,7 @@ Options:
   --all                    Install into every discovered Odoo instance.
   --database DB            Override the database from the .o3p.json file.
   --addons-dir PATH        Override addons directory detection.
-  --force                  Replace existing target addon directories.
+  --force                  Replace existing target addon directories without prompting.
   --yes                    Accept non-destructive prompts.
   --non-interactive        Never prompt; auto-select the highest confidence instance.
   --dry-run                Show discovery and planned actions without copying/restarting.
@@ -878,15 +878,13 @@ install_module_host() {
     local target="$addons/$dest_name"
 
     if [[ -e "$target" ]]; then
-        if [[ "$force" == "true" ]]; then
+        if confirm_replace "$target" "$force"; then
             if [[ "$DRY_RUN" -eq 1 ]]; then
                 info "Would remove existing addon: $target"
             else
                 info "Removing existing addon: $target"
             fi
             [[ "$DRY_RUN" -eq 1 ]] || rm -rf "$target"
-        else
-            fail "Addon already exists: $target. Rerun with --force to replace it."
         fi
     fi
 
@@ -902,20 +900,49 @@ install_module_docker() {
     local target="$addons/$dest_name"
 
     if docker exec "$cid" sh -lc "test -e $(shell_quote "$target")" >/dev/null 2>&1; then
-        if [[ "$force" == "true" ]]; then
+        if confirm_replace "$target" "$force"; then
             if [[ "$DRY_RUN" -eq 1 ]]; then
                 info "Would remove existing addon in container: $target"
             else
                 info "Removing existing addon in container: $target"
             fi
             [[ "$DRY_RUN" -eq 1 ]] || docker exec "$cid" rm -rf "$target"
-        else
-            fail "Addon already exists in container: $target. Rerun with --force to replace it."
         fi
     fi
 
     [[ "$DRY_RUN" -eq 1 ]] && info "Would copy addon into container $cid:$target" || info "Copying addon into container $cid:$target"
     [[ "$DRY_RUN" -eq 1 ]] || docker cp "$source" "$cid:$target"
+}
+
+confirm_replace() {
+    local target="$1" force="$2"
+    local answer
+
+    if [[ "$force" == "true" ]]; then
+        return 0
+    fi
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        warn "Existing addon found at $target; a real run would ask before replacing it."
+        return 0
+    fi
+    if [[ -r /dev/tty && -w /dev/tty ]]; then
+        printf 'Replace existing addon at %s? [y/N] ' "$target" > /dev/tty
+        read -r answer < /dev/tty
+    elif [[ -t 0 ]]; then
+        printf 'Replace existing addon at %s? [y/N] ' "$target"
+        read -r answer
+    else
+        fail "Addon already exists: $target. Run interactively to confirm replacement, or pass --force."
+    fi
+
+    case "${answer,,}" in
+        y|yes)
+            return 0
+            ;;
+        *)
+            fail "Cancelled because addon already exists: $target"
+            ;;
+    esac
 }
 
 module_names_json() {
@@ -1000,13 +1027,13 @@ restart_instance() {
 install_for_instance() {
     local index="$1"
     local database addons_override force restart refresh module_count module_i
-    local repo name source_path dest_name branch selected_branch clone_dir source_dir legacy_count legacy_i legacy
+    local repo name selected_branch clone_dir source_dir
     local install_addons
 
     stage "Preparing instance #$((index + 1))"
     addons_override="${ADDONS_DIR_ARG:-$(json_get '.odoo.addons_dir')}"
     database="${DATABASE_ARG:-$(json_get '.database')}"
-    force="${FORCE_ARG:-$(jq -r '.install.force // .force // false' "$CONFIG_FILE")}"
+    force="${FORCE_ARG:-false}"
     [[ "$NO_RESTART" -eq 1 ]] && restart="false" || restart="$(jq -r '.install.restart // true' "$CONFIG_FILE")"
     [[ "$NO_REFRESH" -eq 1 ]] && refresh="false" || refresh="$(jq -r '.install.refresh_apps // true' "$CONFIG_FILE")"
 
@@ -1018,15 +1045,11 @@ install_for_instance() {
     for ((module_i = 0; module_i < module_count; module_i++)); do
         name="$(jq -r ".modules[$module_i].name // empty" "$CONFIG_FILE")"
         repo="$(jq -r ".modules[$module_i].github_repository // .modules[$module_i].github // .modules[$module_i].repo // .modules[$module_i].repository // .modules[$module_i].\"github repository\" // empty" "$CONFIG_FILE")"
-        source_path="$(jq -r ".modules[$module_i].path // .modules[$module_i].source_path // .modules[$module_i].name // empty" "$CONFIG_FILE")"
-        dest_name="$(jq -r ".modules[$module_i].destination_name // .modules[$module_i].name // empty" "$CONFIG_FILE")"
-        branch="$(jq -r ".modules[$module_i].branch // \"auto\"" "$CONFIG_FILE")"
         [[ -n "$name" ]] || fail "modules[$module_i].name is required."
         [[ -n "$repo" ]] || fail "modules[$module_i].github_repository is required."
-        [[ -n "$dest_name" ]] || dest_name="$name"
 
         stage "Installing module $name"
-        selected_branch="$(select_module_branch "$repo" "$branch" "${INST_VERSION[$index]}")"
+        selected_branch="$(select_module_branch "$repo" "auto" "${INST_VERSION[$index]}")"
         clone_dir="$WORKDIR/module-$module_i-$index"
 
         if [[ -n "$selected_branch" ]]; then
@@ -1039,32 +1062,15 @@ install_for_instance() {
             [[ "$DRY_RUN" -eq 1 ]] || git clone --depth 1 "$repo" "$clone_dir"
         fi
 
-        source_dir="$clone_dir/$source_path"
-        if [[ "$DRY_RUN" -eq 0 && ! -d "$source_dir" && -d "$clone_dir/$name" ]]; then
-            source_dir="$clone_dir/$name"
-        fi
-        [[ "$DRY_RUN" -eq 1 || -d "$source_dir" ]] || fail "Cloned repository does not contain addon path: $source_path"
-
-        legacy_count="$(jq -r ".modules[$module_i].legacy_names // [] | length" "$CONFIG_FILE")"
-        for ((legacy_i = 0; legacy_i < legacy_count; legacy_i++)); do
-            legacy="$(jq -r ".modules[$module_i].legacy_names[$legacy_i]" "$CONFIG_FILE")"
-            if [[ "$INSTALL_MODE" == "docker" ]]; then
-                if docker exec "${INST_CID[$index]}" sh -lc "test -e $(shell_quote "$INSTALL_ADDONS_DIR/$legacy")" >/dev/null 2>&1; then
-                    [[ "$force" == "true" ]] || fail "Legacy addon exists: $INSTALL_ADDONS_DIR/$legacy. Rerun with --force to replace it."
-                    [[ "$DRY_RUN" -eq 1 ]] || docker exec "${INST_CID[$index]}" rm -rf "$INSTALL_ADDONS_DIR/$legacy"
-                fi
-            elif [[ -e "$install_addons/$legacy" ]]; then
-                [[ "$force" == "true" ]] || fail "Legacy addon exists: $install_addons/$legacy. Rerun with --force to replace it."
-                [[ "$DRY_RUN" -eq 1 ]] || rm -rf "$install_addons/$legacy"
-            fi
-        done
+        source_dir="$clone_dir/$name"
+        [[ "$DRY_RUN" -eq 1 || -d "$source_dir" ]] || fail "Cloned repository does not contain addon folder matching module name: $name"
 
         if [[ "$INSTALL_MODE" == "docker" ]]; then
-            install_module_docker "$source_dir" "${INST_CID[$index]}" "$INSTALL_ADDONS_DIR" "$dest_name" "$force"
+            install_module_docker "$source_dir" "${INST_CID[$index]}" "$INSTALL_ADDONS_DIR" "$name" "$force"
         else
             [[ -d "$install_addons" ]] || fail "Addons directory does not exist on host: $install_addons"
             [[ -w "$install_addons" ]] || fail "Addons directory is not writable: $install_addons"
-            install_module_host "$source_dir" "$install_addons" "$dest_name" "$force"
+            install_module_host "$source_dir" "$install_addons" "$name" "$force"
         fi
     done
 

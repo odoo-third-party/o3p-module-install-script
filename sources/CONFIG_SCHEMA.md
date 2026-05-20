@@ -27,18 +27,12 @@ Required per module:
 
 Accepted aliases for `github_repository` are `github`, `repo`, `repository`, and `github repository`.
 
-Optional per module:
-
-- `branch`: branch to clone. Use `auto` or omit it to try the selected Odoo version branch first, then `main`, then `master`.
-- `path`: addon folder inside the cloned repository. Defaults to `name`.
-- `destination_name`: folder name to copy into the addons directory. Defaults to `name`.
-- `legacy_names`: older addon folder names to reject or remove when `--force` is used.
+The module name, addon folder inside the repository, and destination folder inside the Odoo addons directory are the same value. Branch selection is always automatic: the installer tries the selected Odoo version branch first, then `main`, then `master`.
 
 Optional package fields:
 
 - `database`: database to refresh after copy.
 - `odoo.selector`: `auto`, `all`, a discovered instance number, `pid:PID`, or `container:ID_OR_NAME`.
 - `odoo.addons_dir`: explicit addons directory override.
-- `install.force`: replace existing addon folders.
 - `install.restart`: restart the selected Odoo after copy.
 - `install.refresh_apps`: refresh app list and upgrade already-installed modules.
