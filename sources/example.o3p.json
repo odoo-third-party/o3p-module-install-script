@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "name": "Example O3P module package",
+  "database": "",
+  "odoo": {
+    "selector": "auto",
+    "addons_dir": ""
+  },
+  "install": {
+    "force": false,
+    "restart": true,
+    "refresh_apps": true
+  },
+  "modules": [
+    {
+      "name": "perfect_odoo_mcp",
+      "github_repository": "https://github.com/hidekiyamamoto/odoo-mcp",
+      "branch": "auto",
+      "path": "perfect_odoo_mcp",
+      "destination_name": "perfect_odoo_mcp",
+      "legacy_names": ["odoo_mcp"]
+    }
+  ]
+}
